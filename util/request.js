@@ -4,11 +4,11 @@ const queryString = require('querystring')
 const PacProxyAgent = require('pac-proxy-agent')
 const http = require('http')
 const https = require('https')
-
+const tunnel = require('tunnel')
+const qs = require('url')
 // request.debug = true // 开启可看到更详细信息
 
 const chooseUserAgent = (ua = false) => {
-  // UA 列表要经常更新啊
   const userAgentList = {
     mobile: [
       // iOS 13.5.1 14.0 beta with safari
@@ -50,7 +50,7 @@ const createRequest = (method, url, data, options) => {
     if (url.includes('music.163.com'))
       headers['Referer'] = 'https://music.163.com'
     if (options.realIP) headers['X-Real-IP'] = options.realIP
-    // headers['X-Real-IP'] = '118.88.88.88'
+    headers['X-Real-IP'] = '118.88.88.88'
     if (typeof options.cookie === 'object')
       headers['Cookie'] = Object.keys(options.cookie)
         .map(
@@ -85,7 +85,7 @@ const createRequest = (method, url, data, options) => {
       const header = {
         osver: cookie.osver, //系统版本
         deviceId: cookie.deviceId, //encrypt.base64.encode(imei + '\t02:00:00:00:00:00\t5106025eb79a5247\t70ffbaac7')
-        appver: cookie.appver || '6.1.1', // app版本
+        appver: cookie.appver || '8.0.0', // app版本
         versioncode: cookie.versioncode || '140', //版本号
         mobilename: cookie.mobilename, //设备model
         buildver: cookie.buildver || Date.now().toString().substr(0, 10),
@@ -111,7 +111,7 @@ const createRequest = (method, url, data, options) => {
     }
 
     const answer = { status: 500, body: {}, cookie: [] }
-    const settings = {
+    let settings = {
       method: method,
       url: url,
       headers: headers,
@@ -122,13 +122,33 @@ const createRequest = (method, url, data, options) => {
 
     if (options.crypto === 'eapi') settings.encoding = null
 
-    if (/\.pac$/i.test(options.proxy)) {
-      settings.httpAgent = new PacProxyAgent(options.proxy)
-      settings.httpsAgent = new PacProxyAgent(options.proxy)
-    } else {
-      settings.proxy = options.proxy
+    if (options.proxy) {
+      if (options.proxy.indexOf('pac') > -1) {
+        settings.httpAgent = new PacProxyAgent(options.proxy)
+        settings.httpsAgent = new PacProxyAgent(options.proxy)
+      } else {
+        const purl = qs.parse(options.proxy)
+        if (purl.hostname) {
+          const agent = tunnel.httpsOverHttp({
+            proxy: {
+              host: purl.hostname,
+              port: purl.port || 80,
+            },
+          })
+          settings.httpsAgent = agent
+          settings.httpAgent = agent
+          settings.proxy = false
+        } else {
+          console.error('代理配置无效,不使用代理')
+        }
+      }
     }
-
+    if (options.crypto === 'eapi') {
+      settings = {
+        ...settings,
+        responseType: 'arraybuffer',
+      }
+    }
     axios(settings)
       .then((res) => {
         const body = res.data
@@ -136,19 +156,35 @@ const createRequest = (method, url, data, options) => {
           x.replace(/\s*Domain=[^(;|$)]+;*/, ''),
         )
         try {
-          answer.body = body
+          if (options.crypto === 'eapi') {
+            answer.body = JSON.parse(encrypt.decrypt(body).toString())
+          } else {
+            answer.body = body
+          }
+
           answer.status = answer.body.code || res.status
-          if (answer.body.code === 502) {
+          if (
+            [201, 302, 400, 502, 800, 801, 802, 803].indexOf(answer.body.code) >
+            -1
+          ) {
+            // 特殊状态码
             answer.status = 200
           }
         } catch (e) {
-          answer.body = body
+          // console.log(e)
+          try {
+            answer.body = JSON.parse(body.toString())
+          } catch (err) {
+            // console.log(err)
+            // can't decrypt and can't parse directly
+            answer.body = body
+          }
           answer.status = res.status
         }
 
         answer.status =
           100 < answer.status && answer.status < 600 ? answer.status : 400
-        if (answer.status == 200) resolve(answer)
+        if (answer.status === 200) resolve(answer)
         else reject(answer)
       })
       .catch((err) => {

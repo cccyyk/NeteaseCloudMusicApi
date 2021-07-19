@@ -21,6 +21,7 @@ exec('npm info NeteaseCloudMusicApi version', (err, stdout, stderr) => {
 })
 
 const app = express()
+app.set('trust proxy', true)
 
 // CORS & Preflight request
 app.use((req, res, next) => {
@@ -42,9 +43,8 @@ app.use((req, res, next) => {
   ;(req.headers.cookie || '').split(/\s*;\s*/).forEach((pair) => {
     let crack = pair.indexOf('=')
     if (crack < 1 || crack == pair.length - 1) return
-    req.cookies[
-      decodeURIComponent(pair.slice(0, crack)).trim()
-    ] = decodeURIComponent(pair.slice(crack + 1)).trim()
+    req.cookies[decodeURIComponent(pair.slice(0, crack)).trim()] =
+      decodeURIComponent(pair.slice(crack + 1)).trim()
   })
   next()
 })
@@ -78,9 +78,11 @@ fs.readdirSync(path.join(__dirname, 'module'))
     let question = require(path.join(__dirname, 'module', file))
 
     app.use(route, (req, res) => {
-      if (typeof req.query.cookie === 'string') {
-        req.query.cookie = cookieToJson(req.query.cookie)
-      }
+      ;[req.query, req.body].forEach((item) => {
+        if (typeof item.cookie === 'string') {
+          item.cookie = cookieToJson(decodeURIComponent(item.cookie))
+        }
+      })
       let query = Object.assign(
         {},
         { cookie: req.cookies },
@@ -92,7 +94,21 @@ fs.readdirSync(path.join(__dirname, 'module'))
       question(query, request)
         .then((answer) => {
           console.log('[OK]', decodeURIComponent(req.originalUrl))
-          res.append('Set-Cookie', answer.cookie)
+
+          const cookies = answer.cookie
+          if (Array.isArray(cookies) && cookies.length > 0) {
+            if (req.protocol === 'https') {
+              // Try to fix CORS SameSite Problem
+              res.append(
+                'Set-Cookie',
+                cookies.map((cookie) => {
+                  return cookie + '; SameSite=None; Secure'
+                }),
+              )
+            } else {
+              res.append('Set-Cookie', cookies)
+            }
+          }
           res.status(answer.status).send(answer.body)
         })
         .catch((answer) => {
